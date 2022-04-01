@@ -1,0 +1,146 @@
+name: verify-licensing-info
+description: Verifies the licensing info for the current repository.
+inputs:
+  company-name:
+    description: >
+      The name of the company that should appear in the license file and copyright notices.
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: setup cargo
+      uses: actions-rs/toolchain@v1
+      id: toolchain
+      with:
+        profile: minimal
+        toolchain: stable
+        override: true
+    - name: install ripgrep
+      shell: bash
+      run: cargo install ripgrep
+    - name: build licensee
+      shell: bash
+      run: |
+        git clone https://github.com/jacderida/licensee
+        cd licensee
+        git checkout add-user-to-docker
+        docker build . --tag licensee
+    - name: verify license reported by github
+      id: gh_verify
+      shell: bash
+      run: |
+        key=$(gh repo view --json licenseInfo | jq -r .licenseInfo.key)
+        name=$(gh repo view --json licenseInfo | jq -r .licenseInfo.name)
+        echo "Detected key: ${key}"
+        echo "Detected name: ${name}"
+        if [[ ! -n $key ]] || [[ $key == "other" ]]; then
+          echo "Github detected the 'other' license key or it was not set."
+          echo "This indicates that the LICENSE file does not exist or has not be set correctly."
+          exit 1
+        fi
+        echo "::set-output name=github_key_name::$key"
+        echo "::set-output name=github_license_name::$name"
+    - name: verify expected license files
+      shell: bash
+      run: |
+        readarray -t matched_files < <(docker run --rm --volume \
+          `pwd`:/usr/src/target licensee detect /usr/src/target --json | \
+          jq -r '.matched_files[].filename')
+        len="${#matched_files[@]}"
+        echo "Licensee detected $len licenses:"
+        echo "${matched_files[@]}"
+        if [[ $len -lt 2 ]]; then
+          echo "This repository is either missing a LICENSE file, or no license is declared in the README."
+          echo "Or both."
+          exit 1
+        elif [[ $len -gt 2 ]]; then
+          echo "Licensee detected more than two licenses."
+          echo "To keep things clean, please modify the repository to:"
+          echo "* Use one license in a LICENSE file at the root"
+          echo "* Make a reference to the license in the README"
+          exit 1
+        fi
+
+        if [[ ! " ${matched_files[*]} " =~ "LICENSE" ]]; then
+          echo "Licensee did not detect a valid license in the LICENSE file"
+          exit 1
+        fi
+        if [[ ! " ${matched_files[*]} " =~ "README" ]]; then
+          echo "Licensee did not detect a valid license in the README file"
+          exit 1
+        fi
+    - name: verify license details
+      env:
+        GITHUB_LICENSE_NAME: ${{ steps.gh_verify.outputs.github_license_name }}
+        COMPANY_NAME: ${{ inputs.company-name }}
+      shell: bash
+      run: |
+        readarray -t matched_licenses < <(docker run --rm --volume \
+          `pwd`:/usr/src/target licensee detect /usr/src/target --json | \
+          jq -r '.matched_files[].matched_license')
+        echo "Licensee detected license references:"
+        echo "${matched_licenses[@]}"
+        if [[ ${matched_licenses[0]} == *"$GITHUB_LICENSE_NAME"* ]]; then
+          echo "The first matched license is ${matched_licenses[0]}"
+          echo "This differs from license reported by the Github API: $GITHUB_LICENSE_NAME"
+          exit 1
+        fi
+        if [[ ${matched_licenses[1]} == *"$GITHUB_LICENSE_NAME"* ]]; then
+          echo "The second matched license is ${matched_licenses[1]}"
+          echo "This differs from license reported by the Github API: $GITHUB_LICENSE_NAME"
+          exit 1
+        fi
+        attribution=$( \
+          docker run --rm --volume `pwd`:/usr/src/target licensee detect /usr/src/target --json | \
+          jq '.matched_files[] | select(.filename=="LICENSE")' | jq -r .attribution)
+        echo "Licensee detected attribution in LICENSE file: $attribution"
+        if [[ ! $attribution == *"$COMPANY_NAME"* ]]; then
+          echo "The attribtion does not contain the expected company name $COMPANY_NAME"
+          exit 1
+        fi
+    - name: verify source files
+      env:
+        GITHUB_LICENSE_NAME: ${{ steps.gh_verify.outputs.github_license_name }}
+        COMPANY_NAME: ${{ inputs.company-name }}
+      shell: bash
+      run: |
+        exit_code=0
+        attribution=$( \
+          docker run --rm --volume `pwd`:/usr/src/target licensee detect /usr/src/target --json | \
+          jq '.matched_files[] | select(.filename=="LICENSE")' | jq -r .attribution)
+        readarray -t matched_licenses < <(docker run --rm --volume \
+          `pwd`:/usr/src/target licensee detect /usr/src/target --json | \
+          jq -r '.matched_files[].matched_license')
+
+        echo "Searching source files for copyright notice '$attribution'"
+        readarray -t files_missing_copyright_notice < <( \
+          rg --type rust --files-without-match --fixed-strings "$attribution" .)
+        if [[ ${#files_missing_copyright_notice[@]} -gt 0 ]]; then
+          echo "The following files were found to be missing a copyright notice:"
+          for file in ${files_missing_copyright_notice[@]}; do
+            echo "$file"
+          done
+          ((exit_code++))
+        else
+          echo "All source files contain a copyright notice."
+        fi
+
+        echo "Searching source files for license reference '${matched_licenses[0]}'"
+        readarray -t files_missing_license_ref < <( \
+          rg --type rust --files-without-match --fixed-strings "${matched_licenses[0]}" .)
+        if [[ ${#files_missing_license_ref[@]} -gt 0 ]]; then
+          echo "The following files were missing a license reference:"
+          for file in ${files_missing_license_ref[@]}; do
+            echo "$file"
+          done
+          ((exit_code++))
+        else
+          echo "All source files contain a license reference."
+        fi
+
+        exit $exit_code
+
+branding:
+  icon: 'globe'
+  color: 'blue'
