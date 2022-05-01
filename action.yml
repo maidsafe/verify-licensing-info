@@ -54,11 +54,12 @@ runs:
           echo "This repository is either missing a LICENSE file, or no license is declared in the README."
           echo "Or both."
           exit 1
-        elif [[ $len -gt 2 ]]; then
+        elif [[ $len -gt 3 ]]; then
           echo "Licensee detected more than two licenses."
           echo "To keep things clean, please modify the repository to:"
-          echo "* Use one license in a LICENSE file at the root"
-          echo "* Make a reference to the license in the README"
+          echo "* Use one license in a LICENSE file at the root."
+          echo "* Make a reference to the license in the README."
+          echo "* If this is a Cargo repository, add a license to the Cargo manifest."
           exit 1
         fi
 
@@ -140,6 +141,18 @@ runs:
         fi
 
         exit $exit_code
+    - name: verify cargo manifest
+      env:
+        GITHUB_LICENSE_NAME: ${{ steps.gh_verify.outputs.github_license_name }}
+        COMPANY_NAME: ${{ inputs.company-name }}
+      shell: bash
+      run: |
+        find ../.. -name "check-cargo-manifest.py" -exec cp '{}' . \;
+        readarray -t matched_licenses < <(docker run --rm --volume \
+          `pwd`:/usr/src/target licensee detect /usr/src/target --json | \
+          jq -r '.matched_files[].matched_license')
+        pip install toml
+        ./check-cargo-manifest.py "${matched_licenses[0]}" "Cargo.toml"
 
 branding:
   icon: 'globe'
