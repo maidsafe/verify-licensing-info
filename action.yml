@@ -26,21 +26,6 @@ runs:
         cd licensee
         git checkout add-user-to-docker
         docker build . --tag licensee
-    - name: verify license reported by github
-      id: gh_verify
-      shell: bash
-      run: |
-        key=$(gh repo view --json licenseInfo | jq -r .licenseInfo.key)
-        name=$(gh repo view --json licenseInfo | jq -r .licenseInfo.name)
-        echo "Detected key: ${key}"
-        echo "Detected name: ${name}"
-        if [[ ! -n $key ]] || [[ $key == "other" ]]; then
-          echo "Github detected the 'other' license key or it was not set."
-          echo "This indicates that the LICENSE file does not exist or has not be set correctly."
-          exit 1
-        fi
-        echo "::set-output name=github_key_name::$key"
-        echo "::set-output name=github_license_name::$name"
     - name: verify expected license files
       shell: bash
       run: |
@@ -48,14 +33,14 @@ runs:
           `pwd`:/usr/src/target licensee detect /usr/src/target --json | \
           jq -r '.matched_files[].filename')
         len="${#matched_files[@]}"
-        echo "Licensee detected $len licenses:"
+        echo "Licensee detected $len files with license references:"
         echo "${matched_files[@]}"
         if [[ $len -lt 2 ]]; then
           echo "This repository is either missing a LICENSE file, or no license is declared in the README."
           echo "Or both."
           exit 1
         elif [[ $len -gt 3 ]]; then
-          echo "Licensee detected more than two licenses."
+          echo "Licensee detected more than three licenses."
           echo "To keep things clean, please modify the repository to:"
           echo "* Use one license in a LICENSE file at the root."
           echo "* Make a reference to the license in the README."
@@ -73,36 +58,43 @@ runs:
         fi
     - name: verify license details
       env:
-        GITHUB_LICENSE_NAME: ${{ steps.gh_verify.outputs.github_license_name }}
         COMPANY_NAME: ${{ inputs.company-name }}
       shell: bash
       run: |
         readarray -t matched_licenses < <(docker run --rm --volume \
           `pwd`:/usr/src/target licensee detect /usr/src/target --json | \
           jq -r '.matched_files[].matched_license')
-        echo "Licensee detected license references:"
+        echo "Licensee detected the following license references:"
         echo "${matched_licenses[@]}"
-        if [[ ${matched_licenses[0]} == *"$GITHUB_LICENSE_NAME"* ]]; then
-          echo "The first matched license is ${matched_licenses[0]}"
-          echo "This differs from license reported by the Github API: $GITHUB_LICENSE_NAME"
-          exit 1
-        fi
-        if [[ ${matched_licenses[1]} == *"$GITHUB_LICENSE_NAME"* ]]; then
-          echo "The second matched license is ${matched_licenses[1]}"
-          echo "This differs from license reported by the Github API: $GITHUB_LICENSE_NAME"
-          exit 1
-        fi
-        attribution=$( \
+
+        license_file_license=$( \
           docker run --rm --volume `pwd`:/usr/src/target licensee detect /usr/src/target --json | \
-          jq '.matched_files[] | select(.filename=="LICENSE")' | jq -r .attribution)
-        echo "Licensee detected attribution in LICENSE file: $attribution"
-        if [[ ! $attribution == *"$COMPANY_NAME"* ]]; then
-          echo "The attribtion does not contain the expected company name $COMPANY_NAME"
+          jq '.matched_files[] | select(.filename=="LICENSE")' | jq -r .matched_license)
+        readme_file_license=$( \
+          docker run --rm --volume `pwd`:/usr/src/target licensee detect /usr/src/target --json | \
+          jq '.matched_files[] | select(.filename=="README.md")' | jq -r .matched_license)
+
+        if [[ "${readme_file_license}" != "${license_file_license}" ]]; then
+          echo "The README has a reference to the ${readme_file_license} license."
+          echo "This differs from license in the LICENSE file, which is ${license_file_license}."
           exit 1
+        fi
+
+        # The license file attribution isn't picked up for a GPL3 license, so we can only do this
+        # check for BSD-3-Clause. Not sure about how it will work for other license types. At the
+        # moment, we're only using these two.
+        if [[ "$license_file_license" == "BSD-3-Clause" ]]; then
+          attribution=$( \
+            docker run --rm --volume `pwd`:/usr/src/target licensee detect /usr/src/target --json | \
+            jq '.matched_files[] | select(.filename=="LICENSE")' | jq -r .attribution)
+          echo "Licensee detected attribution in LICENSE file: $attribution"
+          if [[ ! $attribution == *"$COMPANY_NAME"* ]]; then
+            echo "The attribtion does not contain the expected company name $COMPANY_NAME"
+            exit 1
+          fi
         fi
     - name: verify source files
       env:
-        GITHUB_LICENSE_NAME: ${{ steps.gh_verify.outputs.github_license_name }}
         COMPANY_NAME: ${{ inputs.company-name }}
       shell: bash
       run: |
@@ -113,6 +105,13 @@ runs:
         readarray -t matched_licenses < <(docker run --rm --volume \
           `pwd`:/usr/src/target licensee detect /usr/src/target --json | \
           jq -r '.matched_files[].matched_license')
+
+        # If a GPL3 license is being used, it won't have an attribution, in which case, we can check
+        # the one that it advises the use of (this is defined in the text of the GPL3 license).
+        year=$(date +%-Y)
+        if [[ -n "$attribution" ]] || [[ "$attribution" == "null" ]]; then
+          attribution="Copyright (C) ${year} ${COMPANY_NAME}."
+        fi
 
         echo "Searching source files for copyright notice '$attribution'"
         readarray -t files_missing_copyright_notice < <( \
@@ -143,7 +142,6 @@ runs:
         exit $exit_code
     - name: verify cargo manifest
       env:
-        GITHUB_LICENSE_NAME: ${{ steps.gh_verify.outputs.github_license_name }}
         COMPANY_NAME: ${{ inputs.company-name }}
       shell: bash
       run: |
