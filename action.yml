@@ -105,14 +105,22 @@ runs:
         readarray -t matched_licenses < <(docker run --rm --volume \
           `pwd`:/usr/src/target licensee detect /usr/src/target --json | \
           jq -r '.matched_files[].matched_license')
+        echo "Detected attribution in LICENSE file: ${attribution}"
 
         # If a GPL3 license is being used, it won't have an attribution, in which case, we can check
         # the one that it advises the use of (this is defined in the text of the GPL3 license).
+        # The licensee tool can also return the text 'null' for the attribution, so check this too.
         year=$(date +%-Y)
-        if [[ -n "$attribution" ]] || [[ "$attribution" == "null" ]]; then
+        if [[ -z "$attribution" ]] || [[ "$attribution" == "null" ]]; then
           attribution="Copyright (C) ${year} ${COMPANY_NAME}."
+          echo "The LICENSE file does not contain an attribution."
+          echo "We will assume we're working with a GPL3 license."
         fi
 
+        # The use of `--fixed-string` here and below is to tell rg not to use regexes. This is
+        # because the parentheses in the attribution will cause rg to think we're trying to group
+        # something in a regex; using `--fixed-string` just gives us a simple contains-based search
+        # for the attribution.
         echo "Searching source files for copyright notice '$attribution'"
         readarray -t files_missing_copyright_notice < <( \
           rg --type rust --files-without-match --fixed-strings "$attribution" .)
