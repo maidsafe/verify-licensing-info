@@ -1,6 +1,16 @@
 name: verify-licensing-info
 description: Verifies the licensing info for the current repository.
 inputs:
+  cargo-workspace:
+    description: Set to true for working with a Cargo workspace repository.
+    required: false
+    default: false
+  crates:
+    description: >
+      Use in conjunction with the `cargo-workspace` input to specify the crates to check for
+      licensing. If `cargo-workspace` is set, this input must also be set. It should be a space
+      separated string.
+    required: false
   company-name:
     description: >
       The name of the company that should appear in the license file and copyright notices.
@@ -56,43 +66,83 @@ runs:
           echo "Licensee did not detect a valid license in the README file"
           exit 1
         fi
+
+        if [[ "$CARGO_WORKSPACE" == "true" ]]; then
+          if [[ -z "$CRATES" ]]; then
+            echo "If working with a workspace repository, the crates input must be set."
+            exit 1
+          fi
+          IFS=" " read -ra crates <<< "$CRATES"
+          for crate in "${crates[@]}"
+          do
+            readarray -t matched_files < <(docker run --rm --volume \
+              `pwd`:/usr/src/target licensee detect /usr/src/target/$crate --json | \
+              jq -r '.matched_files[].filename')
+            if [[ ! " ${matched_files[*]} " =~ "README" ]]; then
+              echo "Licensee did not detect a valid license in the README file"
+              exit 1
+            fi
+          done
+        fi
     - name: verify license details
       env:
         COMPANY_NAME: ${{ inputs.company-name }}
+        CARGO_WORKSPACE: ${{ inputs.cargo-workspace }}
+        CRATES: ${{ inputs.crates }}
       shell: bash
       run: |
-        readarray -t matched_licenses < <(docker run --rm --volume \
-          `pwd`:/usr/src/target licensee detect /usr/src/target --json | \
-          jq -r '.matched_files[].matched_license')
-        echo "Licensee detected the following license references:"
-        echo "${matched_licenses[@]}"
+        if [[ "$CARGO_WORKSPACE" == "true" ]]; then
+          if [[ -z "$CRATES" ]]; then
+            echo "If working with a workspace repository, the crates input must be set."
+            exit 1
+          fi
+          IFS=" " read -ra crates <<< "$CRATES"
+          declare -a crate_paths=()
+          for crate in "${crates[@]}"
+          do
+            crate_paths += "/usr/src/target/$crate"
+          done
+        else
+          readarray -t matched_licenses < <(docker run --rm --volume \
+            `pwd`:/usr/src/target licensee detect /usr/src/target --json | \
+            jq -r '.matched_files[].matched_license')
+          echo "Licensee detected the following license references:"
+          echo "${matched_licenses[@]}"
+          declare -a crate_paths=( "/usr/src/target" )
+        fi
 
+        # Read the license declared in the LICENSE file at the base of the repo and then compare it
+        # to the licenses in each of the README files in the repository. If this is a workspace
+        # repo, we'll be working with multiple crates.
         license_file_license=$( \
           docker run --rm --volume `pwd`:/usr/src/target licensee detect /usr/src/target --json | \
           jq '.matched_files[] | select(.filename=="LICENSE")' | jq -r .matched_license)
-        readme_file_license=$( \
-          docker run --rm --volume `pwd`:/usr/src/target licensee detect /usr/src/target --json | \
-          jq '.matched_files[] | select(.filename=="README.md")' | jq -r .matched_license)
+        for crate_path in "${crate_paths[@]}"
+        do
+          readme_file_license=$( \
+            docker run --rm --volume `pwd`:/usr/src/target licensee detect $crate_path --json | \
+            jq '.matched_files[] | select(.filename=="README.md")' | jq -r .matched_license)
 
-        if [[ "${readme_file_license}" != "${license_file_license}" ]]; then
-          echo "The README has a reference to the ${readme_file_license} license."
-          echo "This differs from license in the LICENSE file, which is ${license_file_license}."
-          exit 1
-        fi
-
-        # The license file attribution isn't picked up for a GPL3 license, so we can only do this
-        # check for BSD-3-Clause. Not sure about how it will work for other license types. At the
-        # moment, we're only using these two.
-        if [[ "$license_file_license" == "BSD-3-Clause" ]]; then
-          attribution=$( \
-            docker run --rm --volume `pwd`:/usr/src/target licensee detect /usr/src/target --json | \
-            jq '.matched_files[] | select(.filename=="LICENSE")' | jq -r .attribution)
-          echo "Licensee detected attribution in LICENSE file: $attribution"
-          if [[ ! $attribution == *"$COMPANY_NAME"* ]]; then
-            echo "The attribtion does not contain the expected company name $COMPANY_NAME"
+          if [[ "${readme_file_license}" != "${license_file_license}" ]]; then
+            echo "The README has a reference to the ${readme_file_license} license."
+            echo "This differs from license in the LICENSE file, which is ${license_file_license}."
             exit 1
           fi
-        fi
+
+          # The license file attribution isn't picked up for a GPL3 license, so we can only do this
+          # check for BSD-3-Clause. Not sure about how it will work for other license types. At the
+          # moment, we're only using these two.
+          if [[ "$license_file_license" == "BSD-3-Clause" ]]; then
+            attribution=$( \
+              docker run --rm --volume `pwd`:/usr/src/target licensee detect /usr/src/target --json | \
+              jq '.matched_files[] | select(.filename=="LICENSE")' | jq -r .attribution)
+            echo "Licensee detected attribution in LICENSE file: $attribution"
+            if [[ ! $attribution == *"$COMPANY_NAME"* ]]; then
+              echo "The attribtion does not contain the expected company name $COMPANY_NAME"
+              exit 1
+            fi
+          fi
+        done
     - name: verify source files
       env:
         COMPANY_NAME: ${{ inputs.company-name }}
