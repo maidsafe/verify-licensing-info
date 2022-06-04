@@ -38,7 +38,7 @@ Example usage for a workspace repository:
     crates: "sn_interface sn_dysfunction sn_node sn_client sn_api sn_cli"
 ```
 
-For verifying source files, the action relies on an installation of [ripgrep](https://crates.io/crates/ripgrep), hence the installation of the Rust toolchain to run the `cargo install`.
+For verifying source files, the action relies on an installation of [ripgrep](https://crates.io/crates/ripgrep), hence the installation of the Rust toolchain to run the `cargo install`. It's easier to instruct the caller to do this because you don't appear to be able to call a custom action from within another.
 
 It verifies:
 

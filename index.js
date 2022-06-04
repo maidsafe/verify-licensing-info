@@ -2,6 +2,7 @@ const core = require('@actions/core');
 const exec = require('@actions/exec');
 const fs = require('fs');
 const jq = require('node-jq');
+const { spawnSync } = require('child_process');
 
 var IS_CARGO_WORKSPACE = false;
 var CRATES = [];
@@ -23,6 +24,28 @@ async function runLicensee(sourcePath) {
       '/usr/src/target', '--json'
     ],
     options);
+  return output;
+}
+
+async function runRipGrep(searchString) {
+  // The ripgrep process needs to be run using the underlying Node process libraries,
+  // because there are issues when you want to have an argument be enclosed in double quotes,
+  // in this case because it is a search string that has spaces in it.
+  //
+  // The actions/exec package doesn't support configuration of stdio or passing the process
+  // through the shell, both of which are necessary for this scenario.
+  let output = '';
+  const options = {};
+  options.shell = true;
+  options.stdio = ['ignore', 'pipe', 'inherit'];
+  const child = spawnSync(
+    'rg',
+    [
+      '--type', 'rust', '--files-without-match',
+      '--fixed-strings', `"${searchString}"`
+    ],
+    options);
+  output = child.stdout.toString();
   return output;
 }
 
@@ -97,6 +120,22 @@ async function matchLicenseReferenceInFile(sourcePath, filename) {
   }
 }
 
+async function matchLicenseAttribution() {
+  let licenseeOutput;
+  let jqOutput;
+  const cwd = process.cwd();
+  try {
+    licenseeOutput = await runLicensee(cwd);
+    jqOutput = await jq.run(`.matched_files[] | select(.filename=="LICENSE")`,
+      licenseeOutput, { input: 'string', output: 'string' });
+    jqOutput = await jq.run('.attribution', jqOutput, { input: 'string', output: 'string' });
+    return jqOutput;
+  } catch (err) {
+    core.setFailed(`Action failed: ${err}`);
+    return;
+  }
+}
+
 async function verifyMatchedFiles(matchedFiles, crateName) {
   core.info(`Verifying license files for ${crateName}.`);
   core.info(`Licensee detected ${matchedFiles.length} files with license references:`);
@@ -150,7 +189,7 @@ async function verifyMatchedFiles(matchedFiles, crateName) {
 
 async function verifyLicenseFiles() {
   const cwd = process.cwd();
-  let matchedFiles = await matchLicenseFiles(`${cwd}`);
+  let matchedFiles = await matchLicenseFiles(cwd);
   await verifyMatchedFiles(matchedFiles, 'root');
 
   if (IS_CARGO_WORKSPACE) {
@@ -167,13 +206,13 @@ async function verifyLicenseFiles() {
 
 async function verifyLicenseDetails() {
   const cwd = process.cwd();
-  let matchedLicenses = await matchLicenseReferences(`${cwd}`);
+  let matchedLicenses = await matchLicenseReferences(cwd);
   core.info('Licensee detected the following license references:');
   core.info(matchedLicenses);
 
   let cargoLicense;
-  let licenseFileLicense = await matchLicenseReferenceInFile(`${cwd}`, 'LICENSE');
-  let readmeLicense = await matchLicenseReferenceInFile(`${cwd}`, 'README.md');
+  let licenseFileLicense = await matchLicenseReferenceInFile(cwd, 'LICENSE');
+  let readmeLicense = await matchLicenseReferenceInFile(cwd, 'README.md');
   if (IS_CARGO_WORKSPACE) {
     core.info(`License detected in the root LICENSE file: ${licenseFileLicense}`);
     core.info(`License detected in the root README file: ${readmeLicense}`);
@@ -214,11 +253,34 @@ async function verifyLicenseDetails() {
   }
 }
 
+async function verifySourceFiles() {
+  let attribution = await matchLicenseAttribution();
+  if (attribution == 'null' || attribution.trim().length == 0) {
+    let year = new Date().getFullYear();
+    attribution = `Copyright (C) ${year} ${COMPANY_NAME}.`;
+    core.info('No attribution detected in LICENSE.');
+    core.info(`We will use ${attribution}`);
+  } else {
+    core.info(`Detected attribution ${attribution}`);
+  }
+
+  core.info(`Searching source files for copyright notice '${attribution}'`);
+  let output = await runRipGrep(attribution);
+  if (output.trim().length == 0) {
+    core.info('All source files contain a copyright notice.');
+  } else {
+    core.info('The following files were found to be missing a copyright notice:');
+    core.info(output);
+    core.setFailed('Please add copyright notices to those files.');
+  }
+}
+
 async function run() {
   await parseInputs();
   await buildLicensee();
   await verifyLicenseFiles();
   await verifyLicenseDetails();
+  await verifySourceFiles();
 }
 
 run();
