@@ -45,7 +45,19 @@ async function runRipGrep(searchString) {
       '--fixed-strings', `"${searchString}"`
     ],
     options);
-  output = child.stdout.toString();
+  output = child.stdout.toString().trim();
+  // Due to the fact that this process is launched through the shell, it's possible for it to
+  // fail if it's not launched in a manner that is compatible with the shell. For example, if
+  // searchString contains double quotes, which the shell couldn't parse correctly. In this
+  // case, you want the action to fail.
+  //
+  // However, unfortunately, we can't just check the exit code, because we're asking ripgrep to
+  // return files that *do not* contain a certain string. This means that if all the files *do*
+  // contain the string we're looking for, ripgrep treats it as an error. In the case where all
+  // the files do contain the string, the output will be empty, so we will check that first.
+  if (output.length != 0 && child.exitCode != 0) {
+    core.setFailed(`Action failed: ${output}`);
+  }
   return output;
 }
 
@@ -129,6 +141,9 @@ async function matchLicenseAttribution() {
     jqOutput = await jq.run(`.matched_files[] | select(.filename=="LICENSE")`,
       licenseeOutput, { input: 'string', output: 'string' });
     jqOutput = await jq.run('.attribution', jqOutput, { input: 'string', output: 'string' });
+    // The attribution from Licensee may be encapsulated in double quotes, which we need to remove
+    // to pass through the shell when we run ripgrep.
+    jqOutput = jqOutput.replace(/\"/g, '');
     return jqOutput;
   } catch (err) {
     core.setFailed(`Action failed: ${err}`);
@@ -266,7 +281,7 @@ async function verifySourceFiles() {
 
   core.info(`Searching source files for copyright notice '${attribution}'`);
   let output = await runRipGrep(attribution);
-  if (output.trim().length == 0) {
+  if (output.length == 0) {
     core.info('All source files contain a copyright notice.');
   } else {
     core.info('The following files were found to be missing a copyright notice:');
