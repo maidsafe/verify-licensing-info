@@ -276,7 +276,28 @@ async function verifySourceFiles() {
     core.info('No attribution detected in LICENSE.');
     core.info(`We will use ${attribution}`);
   } else {
-    core.info(`Detected attribution ${attribution}`);
+    const split = attribution.split('\\n');
+    if (split.length > 1) {
+      // We have multiple attributions, which can occur with a forked
+      // repository. We may be obligated to retain the original attribution,
+      // e.g., with the MIT license. We'll select the attribution that contains
+      // COMPANY_NAME.
+      core.info('Multiple attributions have been detected:');
+      for (let i in split) {
+        let att = split[i];
+        core.info(`${att}`);
+      }
+      attribution = split.find(function(att) {
+        return att.includes(COMPANY_NAME);
+      });
+      if (attribution === undefined) {
+        core.setFailed(`None of the attributions contained our company name ${COMPANY_NAME}`);
+        return;
+      }
+      core.info(`We will use ${attribution}`);
+    } else {
+      core.info(`Detected attribution ${attribution}`);
+    }
   }
 
   core.info(`Searching source files for copyright notice '${attribution}'`);
